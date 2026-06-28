@@ -1,0 +1,22 @@
+# Reference values, double-checked against Fabric's own published artifacts
+# for Minecraft 1.21.1 (as of this writing). If anything fails to resolve
+# when you build, regenerate this file from the official template generator
+# instead: https://fabricmc.net/develop/template/  (pick Minecraft 1.21.1)
+# -- that page always reflects whatever is current.
+
+minecraft_version=1.21.1
+yarn_mappings=1.21.1+build.3
+loader_version=0.16.14
+
+mod_version=1.0.0
+maven_group=com.discordtag
+archives_base_name=discordtag
+
+# Confirmed published as "Fabric API 0.116.11+1.21.1". A slightly newer
+# 1.21.1 build may exist by the time you read this -- check
+# https://fabricmc.net/develop/ or modrinth.com/mod/fabric-api if so.
+fabric_version=0.116.11+1.21.1
+
+# Loom's version moves independently of Minecraft versions; if the generator
+# gives you a different one (e.g. a newer -SNAPSHOT), prefer that.
+loom_version=1.7-SNAPSHOT

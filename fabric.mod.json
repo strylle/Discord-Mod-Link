@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "discordtag",
+  "version": "${version}",
+  "name": "Discord Tag",
+  "description": "A fabric mod that allows a user to link their Minecraft account to Discord, and displays their username in the tab list and above their head.",
+  "authors": [
+    "strylle"
+  ],
+  "license": "CC0-1.0",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.discordtag.DiscordTagMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
