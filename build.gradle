@@ -53,12 +53,9 @@ dependencies {
 }
 
 shadowJar {
-	// shadowJar must consume remapJar's output, not the plain jar task's - JDA's classes
-	// must never pass through Loom's Yarn-to-intermediary remap step. Keep the default
-	// "-all" classifier so this doesn't collide with remapJar's own output file while
-	// shadowJar reads it via zipTree below.
-	dependsOn remapJar
-	from zipTree(remapJar.archiveFile)
+	dependsOn jar
+	from zipTree(jar.archiveFile)
+	archiveClassifier.set('dev-shadow')
 	configurations = [project.configurations.shade]
 
 	relocate 'net.dv8tion.jda', 'com.discordtag.shaded.jda'
@@ -72,7 +69,10 @@ shadowJar {
 	}
 }
 
-build.dependsOn shadowJar
+remapJar {
+	dependsOn shadowJar
+	inputFile.set(shadowJar.archiveFile)
+}
 
 processResources {
 	def version = project.version
