@@ -1,6 +1,7 @@
 plugins {
 	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
 	id 'maven-publish'
+	id 'com.gradleup.shadow' version '9.4.3'
 }
 
 version = project.mod_version
@@ -25,6 +26,13 @@ loom {
 	}
 }
 
+configurations {
+	// Bundled into the mod jar via shadowJar, but never remapped by Loom -
+	// JDA and its transitive deps are not Minecraft-mapped code.
+	shade
+	implementation.extendsFrom shade
+}
+
 dependencies {
 	// To change the versions see the gradle.properties file
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -33,7 +41,38 @@ dependencies {
 
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Embedded Discord bot for tag verification. Gson and slf4j are excluded because
+	// Minecraft's server classpath already provides both - bundling a second copy would
+	// risk classpath collisions with the mod's own Gson/slf4j usage.
+	shade("net.dv8tion:JDA:5.6.1") {
+		exclude module: 'opus-java'
+		exclude group: 'com.google.code.gson'
+		exclude group: 'org.slf4j'
+	}
 }
+
+shadowJar {
+	// shadowJar must consume remapJar's output, not the plain jar task's - JDA's classes
+	// must never pass through Loom's Yarn-to-intermediary remap step. Keep the default
+	// "-all" classifier so this doesn't collide with remapJar's own output file while
+	// shadowJar reads it via zipTree below.
+	dependsOn remapJar
+	from zipTree(remapJar.archiveFile)
+	configurations = [project.configurations.shade]
+
+	relocate 'net.dv8tion.jda', 'com.discordtag.shaded.jda'
+	relocate 'okhttp3', 'com.discordtag.shaded.okhttp3'
+	relocate 'okio', 'com.discordtag.shaded.okio'
+	relocate 'com.neovisionaries.ws', 'com.discordtag.shaded.ws'
+
+	minimize {
+		// JDA loads some classes via reflection; only trim its dependency long-tail.
+		exclude(dependency('net.dv8tion:JDA:.*'))
+	}
+}
+
+build.dependsOn shadowJar
 
 processResources {
 	def version = project.version

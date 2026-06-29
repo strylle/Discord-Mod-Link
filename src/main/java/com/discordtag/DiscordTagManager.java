@@ -1,7 +1,5 @@
 package com.discordtag;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.scoreboard.Scoreboard;
@@ -11,11 +9,6 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
-import java.io.IOException;
-import java.io.Reader;
-import java.io.Writer;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,13 +23,21 @@ public class DiscordTagManager {
     private static final Pattern DISCORD_USERNAME = Pattern.compile("^[a-z0-9_](?:[a-z0-9_.]{0,30}[a-z0-9_])?$");
 
     private static final Path DATA_FILE = FabricLoader.getInstance().getConfigDir().resolve("discordtag.json");
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private final Map<UUID, PlayerEntry> entries = new HashMap<>();
 
     public static class PlayerEntry {
         public String discordName;
         public boolean enabled = true;
+
+        public boolean verified = false;
+        public Long discordUserId;
+        public String discordUsername;
+        public long verifiedAt;
+
+        public String displayName() {
+            return verified ? discordUsername : discordName;
+        }
     }
 
     public static boolean isValidDiscordUsername(String name) {
@@ -44,31 +45,18 @@ public class DiscordTagManager {
     }
 
     public synchronized void load() {
-        if (!Files.exists(DATA_FILE)) {
-            return;
-        }
-        try (Reader reader = Files.newBufferedReader(DATA_FILE, StandardCharsets.UTF_8)) {
-            Map<String, PlayerEntry> raw = GSON.fromJson(reader, new TypeToken<Map<String, PlayerEntry>>() {}.getType());
-            entries.clear();
-            if (raw != null) {
-                raw.forEach((key, value) -> entries.put(UUID.fromString(key), value));
-            }
-        } catch (IOException e) {
-            DiscordTagMod.LOGGER.error("[DiscordTag] Failed to load discordtag.json", e);
+        Map<String, PlayerEntry> raw = JsonFileIO.load(
+                DATA_FILE, new TypeToken<Map<String, PlayerEntry>>() {}.getType(), "discordtag.json");
+        entries.clear();
+        if (raw != null) {
+            raw.forEach((key, value) -> entries.put(UUID.fromString(key), value));
         }
     }
 
     public synchronized void save() {
-        try {
-            Files.createDirectories(DATA_FILE.getParent());
-            Map<String, PlayerEntry> raw = new HashMap<>();
-            entries.forEach((key, value) -> raw.put(key.toString(), value));
-            try (Writer writer = Files.newBufferedWriter(DATA_FILE, StandardCharsets.UTF_8)) {
-                GSON.toJson(raw, writer);
-            }
-        } catch (IOException e) {
-            DiscordTagMod.LOGGER.error("[DiscordTag] Failed to save discordtag.json", e);
-        }
+        Map<String, PlayerEntry> raw = new HashMap<>();
+        entries.forEach((key, value) -> raw.put(key.toString(), value));
+        JsonFileIO.save(DATA_FILE, raw, "discordtag.json");
     }
 
     public synchronized PlayerEntry getEntry(UUID uuid) {
@@ -79,8 +67,13 @@ public class DiscordTagManager {
         PlayerEntry entry = entries.computeIfAbsent(player.getUuid(), id -> new PlayerEntry());
         entry.discordName = discordName;
         entry.enabled = true;
+
+        entry.verified = false;
+        entry.discordUserId = null;
+        entry.discordUsername = null;
+        entry.verifiedAt = 0L;
         save();
-        applyTag(player, discordName);
+        applyTag(player, discordName, false);
     }
 
     public synchronized void setEnabled(ServerPlayerEntity player, boolean enabled) {
@@ -88,13 +81,66 @@ public class DiscordTagManager {
         entry.enabled = enabled;
         save();
         if (enabled && entry.discordName != null) {
-            applyTag(player, entry.discordName);
+            applyTag(player, entry.displayName(), entry.verified);
         } else {
             clearTag(player);
         }
     }
 
-    public void applyTag(ServerPlayerEntity player, String discordName) {
+    public synchronized void markVerified(UUID uuid, long discordUserId, String discordUsername,
+                                           ServerPlayerEntity onlinePlayerOrNull) {
+        PlayerEntry entry = entries.computeIfAbsent(uuid, id -> new PlayerEntry());
+        entry.verified = true;
+        entry.discordUserId = discordUserId;
+        entry.discordUsername = discordUsername;
+        entry.verifiedAt = System.currentTimeMillis();
+        save();
+        if (onlinePlayerOrNull != null) {
+            applyTag(onlinePlayerOrNull, discordUsername, true);
+        }
+    }
+
+    public synchronized UUID findByDiscordId(long discordUserId) {
+        for (Map.Entry<UUID, PlayerEntry> e : entries.entrySet()) {
+            if (e.getValue().discordUserId != null && e.getValue().discordUserId == discordUserId) {
+                return e.getKey();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * de-verifies a player
+     */
+    public synchronized void revokeVerification(UUID uuid, ServerPlayerEntity onlinePlayerOrNull) {
+        PlayerEntry entry = entries.get(uuid);
+        if (entry == null) return;
+        entry.verified = false;
+        save();
+        showAsUnverified(entry, onlinePlayerOrNull);
+    }
+
+    public synchronized void unlink(UUID uuid, ServerPlayerEntity onlinePlayerOrNull) {
+        PlayerEntry entry = entries.get(uuid);
+        if (entry == null) return;
+        entry.verified = false;
+        entry.discordUserId = null;
+        entry.discordUsername = null;
+        entry.verifiedAt = 0L;
+        save();
+        showAsUnverified(entry, onlinePlayerOrNull);
+    }
+
+    private void showAsUnverified(PlayerEntry entry, ServerPlayerEntity onlinePlayerOrNull) {
+        if (onlinePlayerOrNull == null) return;
+        if (entry.enabled && entry.discordName != null) {
+            applyTag(onlinePlayerOrNull, entry.discordName, false);
+        } else {
+            clearTag(onlinePlayerOrNull);
+        }
+    }
+
+    public void applyTag(ServerPlayerEntity player, String displayName, boolean verified) {
         MinecraftServer server = player.getServer();
         if (server == null) return;
 
@@ -106,7 +152,8 @@ public class DiscordTagManager {
             team = scoreboard.addTeam(teamName);
         }
 
-        team.setSuffix(Text.literal(" (" + discordName + ")").formatted(Formatting.LIGHT_PURPLE));
+        Formatting color = verified ? Formatting.GREEN : Formatting.RED;
+        team.setSuffix(Text.literal(" (" + displayName + ")").formatted(color));
 
         scoreboard.addScoreHolderToTeam(player.getGameProfile().getName(), team);
     }

@@ -10,3 +10,8 @@ run/
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+
+# Discord bot secrets (defense in depth - production config dir is outside the repo,
+# this only matters for local Loom run/ testing)
+discordtag-bot.json
+*.token
