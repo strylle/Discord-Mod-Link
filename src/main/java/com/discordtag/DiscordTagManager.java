@@ -109,9 +109,16 @@ public class DiscordTagManager {
         return null;
     }
 
-    /**
-     * de-verifies a player
-     */
+    public synchronized UUID findVerifiedByDiscordId(long discordUserId) {
+        for (Map.Entry<UUID, PlayerEntry> e : entries.entrySet()) {
+            PlayerEntry entry = e.getValue();
+            if (entry.verified && entry.discordUserId != null && entry.discordUserId == discordUserId) {
+                return e.getKey();
+            }
+        }
+        return null;
+    }
+
     public synchronized void revokeVerification(UUID uuid, ServerPlayerEntity onlinePlayerOrNull) {
         PlayerEntry entry = entries.get(uuid);
         if (entry == null) return;

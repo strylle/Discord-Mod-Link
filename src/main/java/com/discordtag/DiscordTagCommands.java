@@ -1,14 +1,18 @@
 package com.discordtag;
 
+import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -33,11 +37,19 @@ public class DiscordTagCommands {
                                 .requires(source -> source.hasPermissionLevel(3))
                                 .then(literal("add")
                                         .then(argument("discord-id-or-username", StringArgumentType.word())
-                                                .executes(ctx -> blacklistTarget(ctx, StringArgumentType.getString(ctx, "discord-id-or-username"), DiscordTagCommands::addToBlacklist))))
+                                                .executes(ctx -> resolveDiscordId(ctx, StringArgumentType.getString(ctx, "discord-id-or-username"), DiscordTagCommands::addToBlacklist))))
                                 .then(literal("remove")
                                         .then(argument("discord-id-or-username", StringArgumentType.word())
-                                                .executes(ctx -> blacklistTarget(ctx, StringArgumentType.getString(ctx, "discord-id-or-username"), DiscordTagCommands::removeFromBlacklist))))
-                                .then(literal("list").executes(DiscordTagCommands::blacklistList)))));
+                                                .executes(ctx -> resolveDiscordId(ctx, StringArgumentType.getString(ctx, "discord-id-or-username"), DiscordTagCommands::removeFromBlacklist))))
+                                .then(literal("list").executes(DiscordTagCommands::blacklistList)))
+                        .then(literal("whois")
+                                .requires(source -> source.hasPermissionLevel(3))
+                                .then(literal("player")
+                                        .then(argument("player", StringArgumentType.word())
+                                                .executes(DiscordTagCommands::whoisPlayer)))
+                                .then(literal("discord")
+                                        .then(argument("discord-id-or-username", StringArgumentType.word())
+                                                .executes(ctx -> resolveDiscordId(ctx, StringArgumentType.getString(ctx, "discord-id-or-username"), DiscordTagCommands::whoisDiscord)))))));
     }
 
     private static int setName(CommandContext<ServerCommandSource> ctx) throws CommandSyntaxException {
@@ -116,12 +128,12 @@ public class DiscordTagCommands {
         return 1;
     }
 
-    private interface BlacklistAction {
+    private interface DiscordIdCallback {
         void apply(ServerCommandSource source, long discordUserId);
     }
 
     // can be a raw int Discord ID (resolved immediately) or a Discord username
-    private static int blacklistTarget(CommandContext<ServerCommandSource> ctx, String target, BlacklistAction action) {
+    private static int resolveDiscordId(CommandContext<ServerCommandSource> ctx, String target, DiscordIdCallback action) {
         Long discordUserId = tryParseDiscordId(target);
         if (discordUserId != null) {
             action.apply(ctx.getSource(), discordUserId);
@@ -130,7 +142,7 @@ public class DiscordTagCommands {
         return findDiscordUserThenApply(ctx, target, action);
     }
 
-    private static int findDiscordUserThenApply(CommandContext<ServerCommandSource> ctx, String discordUsername, BlacklistAction action) {
+    private static int findDiscordUserThenApply(CommandContext<ServerCommandSource> ctx, String discordUsername, DiscordIdCallback action) {
         ServerCommandSource source = ctx.getSource();
         DiscordBotManager bot = DiscordTagMod.runningBot();
         if (bot == null) {
@@ -193,6 +205,90 @@ public class DiscordTagCommands {
             return;
         }
         source.sendFeedback(() -> Text.literal("Removed Discord user " + discordUserId + " from the blacklist.").formatted(Formatting.GREEN), true);
+    }
+
+    private static int whoisPlayer(CommandContext<ServerCommandSource> ctx) {
+        String name = StringArgumentType.getString(ctx, "player");
+        ServerCommandSource source = ctx.getSource();
+        MinecraftServer server = source.getServer();
+
+        ServerPlayerEntity online = server.getPlayerManager().getPlayer(name);
+        UUID uuid;
+        String resolvedName;
+        if (online != null) {
+            uuid = online.getUuid();
+            resolvedName = online.getGameProfile().getName();
+        } else {
+            GameProfile profile = server.getUserCache() != null
+                    ? server.getUserCache().findByName(name).orElse(null)
+                    : null;
+            if (profile == null) {
+                source.sendError(Text.literal("No known player named '" + name + "'."));
+                return 0;
+            }
+            uuid = profile.getId();
+            resolvedName = profile.getName();
+        }
+
+        printWhois(source, uuid, resolvedName);
+        return 1;
+    }
+
+    private static void whoisDiscord(ServerCommandSource source, long discordUserId) {
+        boolean blacklisted = DiscordBlacklist.isBlacklisted(discordUserId);
+        UUID uuid = DiscordTagMod.MANAGER.findByDiscordId(discordUserId);
+        if (uuid == null) {
+            MutableText message = Text.literal("No Minecraft account is linked to Discord ID " + discordUserId + ".").formatted(Formatting.GRAY);
+            if (blacklisted) {
+                message.append(Text.literal("  BLACKLISTED").formatted(Formatting.RED, Formatting.BOLD));
+            }
+            source.sendFeedback(() -> message, false);
+            return;
+        }
+
+        printWhois(source, uuid, resolvePlayerName(source.getServer(), uuid));
+    }
+
+    private static String resolvePlayerName(MinecraftServer server, UUID uuid) {
+        ServerPlayerEntity online = server.getPlayerManager().getPlayer(uuid);
+        if (online != null) {
+            return online.getGameProfile().getName();
+        }
+        if (server.getUserCache() != null) {
+            return server.getUserCache().getByUuid(uuid).map(GameProfile::getName).orElse(uuid.toString());
+        }
+        return uuid.toString();
+    }
+
+    private static void printWhois(ServerCommandSource source, UUID uuid, String name) {
+        DiscordTagManager.PlayerEntry entry = DiscordTagMod.MANAGER.getEntry(uuid);
+        if (entry == null || entry.discordName == null) {
+            source.sendFeedback(() -> Text.literal(name + " (" + uuid + "): no Discord data on file.").formatted(Formatting.GRAY), false);
+            return;
+        }
+
+        boolean blacklisted = entry.discordUserId != null && DiscordBlacklist.isBlacklisted(entry.discordUserId);
+
+        MutableText message = Text.literal(name + " (" + uuid + "):").formatted(Formatting.GRAY)
+                .append(Text.literal("\n  Claimed Discord tag: ").formatted(Formatting.GRAY))
+                .append(Text.literal(entry.discordName).formatted(Formatting.LIGHT_PURPLE))
+                .append(Text.literal("\n  Verified: ").formatted(Formatting.GRAY))
+                .append(Text.literal(entry.verified ? "yes" : "no").formatted(entry.verified ? Formatting.GREEN : Formatting.RED))
+                .append(Text.literal("\n  Tag visibility: ").formatted(Formatting.GRAY))
+                .append(Text.literal(entry.enabled ? "shown" : "hidden").formatted(Formatting.GRAY));
+
+        if (entry.verified) {
+            message.append(Text.literal("\n  Discord account: ").formatted(Formatting.GRAY))
+                    .append(Text.literal(entry.discordUsername + " (" + entry.discordUserId + ")").formatted(Formatting.AQUA))
+                    .append(Text.literal("\n  Verified at: ").formatted(Formatting.GRAY))
+                    .append(Text.literal(new Date(entry.verifiedAt).toString()).formatted(Formatting.GRAY));
+        }
+
+        if (blacklisted) {
+            message.append(Text.literal("\n  BLACKLISTED").formatted(Formatting.RED, Formatting.BOLD));
+        }
+
+        source.sendFeedback(() -> message, false);
     }
 
     private static DiscordTagManager.PlayerEntry getEntryIfNameSet(CommandContext<ServerCommandSource> ctx, ServerPlayerEntity player) {

@@ -7,6 +7,8 @@ import net.dv8tion.jda.api.entities.Activity;
 import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.Member;
 import net.dv8tion.jda.api.entities.User;
+import net.dv8tion.jda.api.entities.UserSnowflake;
+import net.dv8tion.jda.api.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
@@ -24,7 +26,9 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -35,8 +39,12 @@ import java.util.function.Consumer;
  */
 public class DiscordBotManager {
 
+    // rate limit because i realized u could js ddos the server spamming it
+    private static final long VERIFICATION_REQUEST_COOLDOWN_MS = 60_000;
+
     private final DiscordTagManager manager;
     private final DiscordBotConfig config;
+    private final Map<Long, Long> lastVerificationRequestAt = new ConcurrentHashMap<>();
     private final ExecutorService initExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "DiscordTag-Bot-Init");
         t.setDaemon(true);
@@ -163,12 +171,39 @@ public class DiscordBotManager {
                         notifyPlayer(uuid, Text.literal("Verification is not available for that Discord account.").formatted(Formatting.RED));
                         return;
                     }
+                    UUID alreadyLinked = manager.findVerifiedByDiscordId(match.getIdLong());
+                    if (alreadyLinked != null && !alreadyLinked.equals(uuid)) {
+                        notifyPlayer(uuid, Text.literal(
+                                "That Discord account is already verified on a different Minecraft account. Ask them to run /discordtag unlink first.")
+                                .formatted(Formatting.RED));
+                        return;
+                    }
+                    if (!tryReserveVerificationRequest(match.getIdLong())) {
+                        notifyPlayer(uuid, Text.literal(
+                                "A verification request was already sent to that Discord account recently - ask them to check their DMs, or try again in a minute.")
+                                .formatted(Formatting.RED));
+                        return;
+                    }
                     sendConfirmation(uuid, ign, match);
                 },
                 () -> notifyPlayer(uuid, Text.literal(
                         "Couldn't find that Discord username in the server - check spelling, or make sure you've joined the Discord server.")
                         .formatted(Formatting.RED)),
                 () -> notifyPlayer(uuid, Text.literal("Discord verification lookup failed - try again later.").formatted(Formatting.RED)));
+    }
+
+    private boolean tryReserveVerificationRequest(long discordUserId) {
+        long now = System.currentTimeMillis();
+        boolean[] allowed = new boolean[1];
+        lastVerificationRequestAt.compute(discordUserId, (id, last) -> {
+            if (last != null && now - last < VERIFICATION_REQUEST_COOLDOWN_MS) {
+                allowed[0] = false;
+                return last;
+            }
+            allowed[0] = true;
+            return now;
+        });
+        return allowed[0];
     }
 
     private void sendConfirmation(UUID uuid, String ign, Member member) {
@@ -240,19 +275,58 @@ public class DiscordBotManager {
                     notifyPlayer(uuid, Text.literal("Verification is not available for that Discord account.").formatted(Formatting.RED));
                     return;
                 }
-                event.editMessage("Linked ✅ — you can close this.").setComponents(List.of()).queue();
-                whenPlayerIsOnline(uuid, player -> {
-                    manager.markVerified(uuid, expectedDiscordId, event.getUser().getName(), player);
-                    if (player != null) {
-                        player.sendMessage(Text.literal("Your Discord account is now verified!").formatted(Formatting.GREEN), false);
-                    }
-                });
+
+                JDA current = jda;
+                Guild guild = current != null ? current.getGuildById(guildId) : null;
+                if (guild == null) {
+                    event.editMessage("Verification is currently unavailable - try again later.").setComponents(List.of()).queue();
+                    return;
+                }
+
+                UserSnowflake target = UserSnowflake.fromId(expectedDiscordId);
+                Runnable checkMembership = () -> guild.retrieveMember(target).queue(
+                        member -> finishLink(event, uuid, expectedDiscordId),
+                        memberError -> denyNotInGuild(event, uuid, expectedDiscordId, "no longer a member of")
+                );
+                try {
+                    guild.retrieveBan(target).queue(
+                            ban -> denyNotInGuild(event, uuid, expectedDiscordId, "banned from"),
+                            banError -> checkMembership.run());
+                } catch (InsufficientPermissionException e) {
+                    checkMembership.run();
+                }
             } else if ("deny".equals(action)) {
                 event.editMessage("Denied.").setComponents(List.of()).queue();
                 notifyPlayer(uuid, Text.literal(
                         "Your Discord verification request was denied. Make sure you typed the right username and try /discordtag verify again.")
                         .formatted(Formatting.RED));
             }
+        }
+
+        private void denyNotInGuild(ButtonInteractionEvent event, UUID uuid, long discordUserId, String reason) {
+            event.editMessage("This account can't be linked.").setComponents(List.of()).queue();
+            DiscordTagMod.LOGGER.warn("[DiscordTag] Blocked verification confirm - Discord user {} is {} the server", discordUserId, reason);
+            notifyPlayer(uuid, Text.literal(
+                    "Couldn't verify - make sure you're a member of the Discord server.")
+                    .formatted(Formatting.RED));
+        }
+
+        private void finishLink(ButtonInteractionEvent event, UUID uuid, long discordUserId) {
+            UUID alreadyLinked = manager.findVerifiedByDiscordId(discordUserId);
+            if (alreadyLinked != null && !alreadyLinked.equals(uuid)) {
+                event.editMessage("This Discord account is already linked to a different Minecraft account.").setComponents(List.of()).queue();
+                notifyPlayer(uuid, Text.literal(
+                        "That Discord account is already verified on a different Minecraft account. Ask them to run /discordtag unlink first.")
+                        .formatted(Formatting.RED));
+                return;
+            }
+            event.editMessage("Linked ✅ - you can close this.").setComponents(List.of()).queue();
+            whenPlayerIsOnline(uuid, player -> {
+                manager.markVerified(uuid, discordUserId, event.getUser().getName(), player);
+                if (player != null) {
+                    player.sendMessage(Text.literal("Your Discord account is now verified!").formatted(Formatting.GREEN), false);
+                }
+            });
         }
 
         @Override
