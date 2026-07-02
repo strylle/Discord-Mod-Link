@@ -9,9 +9,12 @@ import net.dv8tion.jda.api.entities.Member;
 import net.dv8tion.jda.api.entities.User;
 import net.dv8tion.jda.api.entities.UserSnowflake;
 import net.dv8tion.jda.api.exceptions.InsufficientPermissionException;
+import net.dv8tion.jda.api.events.guild.GuildBanEvent;
+import net.dv8tion.jda.api.events.guild.member.GuildMemberRemoveEvent;
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
+import net.dv8tion.jda.api.requests.GatewayIntent;
 import net.dv8tion.jda.api.interactions.commands.DefaultMemberPermissions;
 import net.dv8tion.jda.api.interactions.commands.OptionMapping;
 import net.dv8tion.jda.api.interactions.commands.OptionType;
@@ -72,6 +75,8 @@ public class DiscordBotManager {
         initExecutor.submit(() -> {
             try {
                 JDABuilder builder = JDABuilder.createDefault(config.token)
+                        // privileged intent, needs the toggle in the dev portal too or the bot won't start
+                        .enableIntents(GatewayIntent.GUILD_MEMBERS)
                         .addEventListeners(new InteractionListener())
                         .setStatus(config.onlineStatus());
                 Activity activity = config.activity();
@@ -325,6 +330,34 @@ public class DiscordBotManager {
                 manager.markVerified(uuid, discordUserId, event.getUser().getName(), player);
                 if (player != null) {
                     player.sendMessage(Text.literal("Your Discord account is now verified!").formatted(Formatting.GREEN), false);
+                }
+            });
+        }
+
+        @Override
+        public void onGuildMemberRemove(GuildMemberRemoveEvent event) {
+            if (event.getGuild().getIdLong() != guildId) return;
+            revokeIfVerified(event.getUser().getIdLong(), "left");
+        }
+
+        @Override
+        public void onGuildBan(GuildBanEvent event) {
+            if (event.getGuild().getIdLong() != guildId) return;
+            revokeIfVerified(event.getUser().getIdLong(), "was banned from");
+        }
+
+        private void revokeIfVerified(long discordUserId, String reason) {
+            server.execute(() -> {
+                // a ban fires both events, check on the server thread so we only revoke once
+                UUID uuid = manager.findVerifiedByDiscordId(discordUserId);
+                if (uuid == null) return;
+                DiscordTagMod.LOGGER.info("[DiscordTag] Discord user {} {} the server - revoking verification", discordUserId, reason);
+                ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
+                manager.revokeVerification(uuid, player);
+                if (player != null) {
+                    player.sendMessage(Text.literal(
+                            "Your Discord account " + reason + " the Discord server, so your verification was revoked.")
+                            .formatted(Formatting.RED), false);
                 }
             });
         }
